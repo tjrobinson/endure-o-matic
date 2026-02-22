@@ -16,12 +16,20 @@ An event should be able to be created and then shared with other users. This wil
 
 The application shouldn't require any login, just a shareable link to an event. 
 
+### Event-Team Structure
+
+Events are **pre-populated server-side configurations** (not user-created). Users create **teams** within an event. Each team gets its own Yjs document, edit/view tokens, and operates independently.
+
+- **Pre-populated events**: Defined in `server/index.ts` as the `EVENTS` array. First entry: "Endure 24" (June 6, 2026 12:00 → June 7, 2026 12:00).
+- **Teams**: User-created via `POST /api/teams` with `{ eventId, teamName }`. Each team gets an `editToken` and `readToken`.
+- **URLs**: `/team/edit/:editToken` (full access) and `/team/view/:readToken` (read-only).
+
 ### Sharing & Access
 
-There are two types of shareable links:
+There are two types of shareable links, **specific to each team** (not the event):
 
-- **Edit link** — Anyone with this link can view and edit the event (intended for team members). The edit link gives full access to add/remove laps, mark laps as started/completed, modify team members, etc.
-- **Read-only link** — Anyone with this link can view the event but cannot make changes. Useful for spectators, family, and supporters.
+- **Edit link** — `/team/edit/:editToken` — Anyone with this link can view and edit the team's data (intended for team members). The edit link gives full access to add/remove laps, mark laps as started/completed, modify team members, etc.
+- **Read-only link** — `/team/view/:readToken` — Anyone with this link can view the team's data but cannot make changes. Useful for spectators, family, and supporters.
 
 No login or authentication is required. Access is controlled purely by which link a user has.
 
@@ -29,6 +37,14 @@ No login or authentication is required. Access is controlled purely by which lin
 
 - A lap is always the **same fixed distance/course** for all team members. This means lap times are directly comparable across team members.
 - Each lap has a single assignee (team member or named guest).
+
+### Lap Constraints
+
+- **Single active lap**: Only one team member can be running a lap at a time. The "Start" button is disabled while another lap is active.
+- **Member reorder lock**: Members who have completed laps or are currently running a lap cannot be reordered in the rotation. A 🔒 badge indicates locked members.
+- **Editable times**: Click any lap duration to edit it inline:
+  - Completed laps: edit `actualDuration` (corrections)
+  - Planned/active laps: edit `predictedDuration`
 
 ### Lap Duration Prediction
 
@@ -39,9 +55,15 @@ Lap durations are **predicted** based on previous performance by the same team m
 - The prediction model should account for **fatigue** — times are expected to increase as the event progresses. A simple fatigue factor (e.g., a percentage slowdown per completed lap) should be applied to extrapolate realistic future times.
 - Once a lap is completed, the **actual duration** replaces the prediction and is used to refine future predictions.
 
-### Predicted Schedule
+### Unified Laps & Schedule View
 
-The app should display **predicted start times and lap durations for all laps** from now until the expected event end. This forward-looking schedule allows participants to plan ahead for sleep, meals, and rest periods. As actual lap data comes in, the predictions should recalculate and the schedule should update in real-time.
+Laps and the predicted schedule are shown in a **single unified view** (one tab, not two separate tabs):
+
+- **Top**: Active lap banner (if running) with live timer
+- **Middle**: Tracked laps table with status, times, and actions
+- **Bottom**: "📅 Predicted Upcoming" section showing the next 20 predicted laps in a timeline format
+
+The two tabs in the app are: **🏁 Laps & Schedule** and **👥 Team**.
 
 ### Planning & Live Mode
 
@@ -75,6 +97,35 @@ There is no separate "planning" vs "live" mode — it is a **single unified view
 ## Architecture
 
 The architecture should be kept as simple as possible as this is a relatively small project. It should be built using modern web technologies and should be mobile-first. It's critical that it can operate offline or with poor connectivity. There will need to be the ability to sync data when connectivity is restored and it needs to support multiple users (within a team) to view and edit the same data. The UI should be clean and modern and easy to use. It should be built using a component-based architecture and should be fully responsive.
+
+### Tech Stack
+
+- **Frontend**: React + TypeScript with Vite (`vite-plugin-pwa` for service worker)
+- **Backend**: Node.js + Express + TypeScript (`tsx` for dev, compiled for prod)
+- **Real-time sync**: Yjs (CRDTs) with custom WebSocket sync protocol
+- **Client persistence**: `y-indexeddb`
+- **Server persistence**: `y-leveldb` + JSON token store
+- **Build**: Single Docker container serving static assets + WebSocket
+
+### Key Source Files
+
+| File | Purpose |
+|---|---|
+| `server/index.ts` | Express server, WebSocket Yjs sync, pre-populated events, team CRUD API, export endpoints |
+| `src/shared/types.ts` | `EventConfig`, `TeamData`, `TeamMember`, `Lap`, `LapStatus`, `ScheduleEntry`, `EventStats`, `MemberStats`, `AccessMode` |
+| `src/hooks/useYjsDocument.ts` | Yjs doc management, WebSocket connection, IndexedDB persistence, CRUD operations, constraint helpers (`canReorderMember`, `hasActiveLap`) |
+| `src/pages/HomePage.tsx` | Event selection dropdown → team creation form → shareable links |
+| `src/pages/TeamPage.tsx` | Main team view with 2 tabs (Laps & Schedule, Team), stats bar, export/share footer |
+| `src/components/LapList.tsx` | Unified laps + predicted schedule view, inline time editing, single-active-lap constraint |
+| `src/components/TeamPanel.tsx` | Member management with reorder constraints |
+| `src/components/StatsBar.tsx` | Progress bar, lap count, fastest/average times, top members |
+| `src/components/ShareLinks.tsx` | Team-specific copyable edit/view URLs |
+| `src/components/ExportMenu.tsx` | JSON and Markdown export buttons |
+| `src/shared/statistics.ts` | Event stats calculation (uses `EventLike` interface) |
+| `src/shared/prediction.ts` | Lap duration prediction with fatigue model, schedule generation |
+| `src/shared/export.ts` | Client-side JSON/Markdown export formatters |
+| `src/index.css` | Dark theme, glassmorphism, responsive design, all component styles |
+| `src/App.tsx` | Routes: `/`, `/team/edit/:token`, `/team/view/:token` |
 
 ### Data Synchronisation (CRDTs)
 
@@ -130,16 +181,52 @@ TypeScript should be used for all code. NodeJs can be used for the backend and R
 
 ## Setup
 
-*TODO: Document how to set up the development environment.*
-
-### Docker
+### Development
 
 ```bash
-docker compose up
+npm install
+npm run dev    # Starts Vite dev server (port 5173) + backend server (port 3000)
 ```
 
-This will build and start the application. The CRDT data is persisted via a Docker volume.
+The Vite dev server proxies `/api` and `/ws` to the backend.
+
+### Production (Docker)
+
+```bash
+docker compose up --build
+```
+
+The app will be available at `http://localhost:3000`. CRDT data is persisted via a Docker volume.
+
+### Production (Manual)
+
+```bash
+npm run build     # Build frontend + compile server TS
+npm run preview   # Start production server on port 3000
+```
+
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/events` | List all pre-populated events |
+| `GET` | `/api/events/:eventId` | Get single event config |
+| `POST` | `/api/teams` | Create team `{ eventId, teamName }` → `{ teamId, editToken, readToken }` |
+| `GET` | `/api/teams/:token` | Get team info + event config for a token |
+| `GET` | `/api/teams/:token/export/json` | Download team data as JSON |
+| `GET` | `/api/teams/:token/export/markdown` | Download team summary as Markdown |
 
 ## Testing
 
 There should be integration tests to cover various scenarios that the app must support, a sequence of events. Testing offline usage and data synchronisation is critical.
+
+## Current Status
+
+The application is fully functional with:
+- Pre-populated events (Endure 24)
+- Team creation with shareable links
+- Real-time Yjs sync with offline support
+- Unified laps & predicted schedule view
+- Lap constraints (single active, reorder lock, inline time editing)
+- PWA support (installable, offline-capable)
+- Docker deployment ready

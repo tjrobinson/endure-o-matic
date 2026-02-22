@@ -1,0 +1,15 @@
+services:
+  endure-o-matic:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - endure-data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATA_DIR=/app/data
+    restart: unless-stopped
+
+volumes:
+  endure-data:
